@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-from collections import Counter
-from sklearn import svm
-from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import MinMaxScaler
-import numpy
-import pandas
 import logging
 import sys
+from collections import Counter
+
 import matplotlib.pyplot as pyplot
+import numpy
+import pandas
+import pandas as pd
+from scipy import interp
+from sklearn import svm
 from sklearn.decomposition import PCA
-import pylab as pl
+from sklearn.metrics import roc_curve, auc
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import MinMaxScaler
 
 
 class SVMPredictingAgent:
@@ -18,14 +21,15 @@ class SVMPredictingAgent:
     extracted from 3D microcalcifications present in their breast tissue. Initialized with the desired SVM kernel,
     the .xlsx file containing the training data and the .xlsx file containing the patient's data.
     """
+
     def __init__(self, kernel, training_file, test_file):
         logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
         self.training_file = training_file
         self.test_file = test_file
         self.kernel = kernel
-        self.training_samples, self.training_classes,\
+        self.training_samples, self.training_classes, \
             self.training_labels, self.patients_list_training = self.parse_data(training_file)
-        self.prediction_samples, self.prediction_classes,\
+        self.prediction_samples, self.prediction_classes, \
             self.prediction_labels, self.patients_list_prediction = self.parse_data(test_file)
         self.micro_svm = svm.SVC()
 
@@ -37,15 +41,23 @@ class SVMPredictingAgent:
         """
         return self.__predict(c_param, self.prediction_samples, self.prediction_classes)
 
-    def split_by_patient(self, c_param):
+    def split_by_patient(self, c_param, prob_param=False, gamma_scale=False):
         """
-        Splits the prediction dataset given by the user by patient, and gives a prediction for every patient. Currently
-        gives the accuracy of the prediction for testing purposes.
+        Splits the prediction dataset given by the user by patient, and gives a prediction for every patient.
+        Gives the accuracy of the prediction for testing purposes or average benign/malignant probabilities for
+        each patient.
+        :param gamma_scale: Whether to use scaling gamma parameter or the automatic one.
+        :param prob_param: Whether or not to calculate probabilities instead of directly classifying the micros
         :param c_param: The error compensation parameter.
         """
-        patient_array = [[] for i in range(int(self.patients_list_prediction[-1][0]) - int(self.patients_list_prediction[0][0])+1)]
-        patient_class = [[] for i in range(int(self.patients_list_prediction[-1][0]) - int(self.patients_list_prediction[0][0])+1)]
-        print("Number of patients: ", patient_array.__len__())
+        if self.kernel == "poly":
+            self.micro_svm = self.init_poly_svm(c_param, prob=True, gamma_scale=gamma_scale)
+        elif self.kernel == "linear":
+            self.micro_svm = self.init_linear_svm(c_param, prob=True)
+        patient_array = [[] for i in range(
+            int(self.patients_list_prediction[-1][0]) - int(self.patients_list_prediction[0][0]) + 1)]
+        patient_class = [[] for i in range(
+            int(self.patients_list_prediction[-1][0]) - int(self.patients_list_prediction[0][0]) + 1)]
         for i in range(len(self.patients_list_prediction)):
             to_add = int(self.patients_list_prediction[i][0]) - int(self.patients_list_prediction[0][0])
             patient_array[to_add].append(self.patients_list_prediction[i][1:])
@@ -54,30 +66,96 @@ class SVMPredictingAgent:
         patient_class = numpy.array(patient_class)
         counter = 0
         predictions_accuracy = []
-        for patient_data in patient_array:
-            patient_data = numpy.array(patient_data)
-            counter += 1
-            #print("Current patient data:", counter, "has the following shape:", patient_data.shape)
-            #print("Current patient classes:", counter, "has the following values:", patient_class[counter-1])
-            current_prediction = self.__predict(c_param, patient_data,
-                                                [patient_class[counter-1][0] for i in range(len(patient_data))])
-            predictions_accuracy.append(current_prediction)
-            print("Current patient:", counter, "predicted with accuracy:", current_prediction)
 
-        predictions_accuracy_mean = [numpy.mean(predictions_accuracy)] * len(predictions_accuracy)
-        print(predictions_accuracy_mean[0])
-        fig, ax = pyplot.subplots()
-        ax.plot(range(counter), predictions_accuracy, label="Patient Predictions Accuracy", marker='o')
-        ax.plot(range(counter), predictions_accuracy_mean, label="Mean Prediction Accuracy", linestyle='--')
-        ax.legend(loc='upper right')
-        ax.set(xlabel='Fold', ylabel='Accuracy',
-               title=('Accuracy test per patient with 3-' + self.kernel + ' kernel, C=' + str(c_param)))
-        ax.grid()
-        ax.text(0, 0.7, ("Mean = " + str(predictions_accuracy_mean[0])))
-        print("Saving file :", ('Accuracy test per patient with ' + self.kernel + ' kernel, C=' + str(c_param)))
-        fig.savefig(('Accuracy test per patient with 3-' + self.kernel + ' kernel, C=' + str(c_param)))
+        if prob_param is False:
+            for patient_data in patient_array:
+                patient_data = numpy.array(patient_data)
+                counter += 1
+                print("Current patient data:", counter, "has the following shape:", patient_data.shape)
+                print("Current patient classes:", counter, "has the following values:", patient_class[counter - 1])
+                current_prediction = self.__predict(c_param, patient_data,
+                                                    [patient_class[counter - 1][0] for i in range(len(patient_data))],
+                                                    self.micro_svm)
+                predictions_accuracy.append(current_prediction)
+                print("Current patient:", counter, "predicted with accuracy:", current_prediction)
 
-    def __predict(self, c_param, prediction_samples, prediction_classes):
+            predictions_accuracy_mean = [numpy.mean(predictions_accuracy)] * len(predictions_accuracy)
+            print(predictions_accuracy_mean[0])
+            fig, ax = pyplot.subplots()
+            ax.plot(range(counter), predictions_accuracy, label="Patient Predictions Accuracy", marker='o')
+            ax.plot(range(counter), predictions_accuracy_mean, label="Mean Prediction Accuracy", linestyle='--')
+            ax.legend(loc='upper right')
+            ax.set(xlabel='Fold', ylabel='Accuracy',
+                   title=('Accuracy test per patient with 3-' + self.kernel + ' kernel, C=' + str(c_param)))
+            ax.grid()
+            ax.text(0, 0.7, ("Mean = " + str(predictions_accuracy_mean[0])))
+            print("Saving file :", ('Accuracy test per patient with ' + self.kernel + ' kernel, C=' + str(c_param)))
+            fig.savefig(('Accuracy test per patient with 3-' + self.kernel + ' kernel, C=' + str(c_param)))
+
+        else:
+            r = range(1, patient_array.__len__() + 1)
+            print("r=", r)
+            green_bars = []
+            orange_bars = []
+            text_report = []
+            for patient_data in patient_array:
+                patient_data = numpy.array(patient_data)
+                counter += 1
+                # print("Current patient data:", counter, "has the following shape:", patient_data.shape)
+                # print("Current patient classes:", counter, "has the following values:", patient_class[counter-1])
+                current_prediction = numpy.array(self.micro_svm.predict_proba(patient_data))
+                predictions_accuracy.append(current_prediction)
+                green_bars.append(current_prediction.mean(axis=0)[0])
+                orange_bars.append(current_prediction.mean(axis=0)[1])
+                predict_tuple = (float('%.3f' % (current_prediction.mean(axis=0)[0])),
+                                 float('%.3f' % (current_prediction.mean(axis=0)[1])))
+                # Create diagnosis
+                if predict_tuple[0] >= 0.82:
+                    diag = "Patient healthy, no biopsy needed."
+                elif predict_tuple[0] >= 0.71:
+                    diag = "Patient probably healthy, low necessity of biopsy."
+                elif predict_tuple[1] >= 0.75:
+                    diag = "Patient has cancer, biopsy needed."
+                elif predict_tuple[1] >= 0.6:
+                    diag = "Patient probably has cancer, high necessity of biopsy."
+                else:
+                    diag = "Diagnosis inconclusive, biopsy recommended."
+
+                text_report.append((predict_tuple[0], predict_tuple[1], diag))
+
+            predictions_accuracy = numpy.array(predictions_accuracy)
+            raw_data = {'greenBars': green_bars, 'orangeBars': orange_bars}
+            df = pd.DataFrame(raw_data)
+            totals = [i + j for i, j in zip(df['greenBars'], df['orangeBars'])]
+            greenBars = [i / j * 100 for i, j in zip(df['greenBars'], totals)]
+            orangeBars = [i / j * 100 for i, j in zip(df['orangeBars'], totals)]
+            # Plotting the patients' results
+            fig = pyplot.figure(figsize=(r.__len__() / 2.2, 8))
+            fig.suptitle("Patient predictions and diagnosis", fontsize=13)
+            ax = pyplot.subplot(121, title="Patient results graph")
+            barWidth = 0.85
+            # Create green Bars
+            grB = pyplot.bar(r, greenBars, color='#b5ffb9', edgecolor='white', width=barWidth, label="Benign level")
+            # Create orange Bars
+            orB = pyplot.bar(r, orangeBars, bottom=greenBars, color='#f9bc86', edgecolor='white', width=barWidth,
+                             label="Malignant level")
+            # Create blue Bars
+            for i in r:
+                mic = pyplot.plot([i for x in range(len(predictions_accuracy[i - 1]))],
+                                  predictions_accuracy[i - 1][:][:, 0] * 100,
+                                  '.', color="gray", markersize=2, label="Microcalcification")[0]
+
+            # Custom x axis
+            pyplot.xlabel("Patient Predictions")
+            pyplot.xticks(r)
+            pyplot.table(cellText=text_report, loc="right", colWidths=[0.1, 0.1, 0.8],
+                         rowLabels=r)
+            ax.legend(handles=[mic, grB, orB], loc="lower left")
+            fig.tight_layout()
+            # Show graphic
+            pyplot.show()
+
+    def __predict(self, c_param, prediction_samples, prediction_classes, krnl=None):
         """
         Predicts the class of the given data using an SVM.
         :param c_param: The error compensation
@@ -86,10 +164,11 @@ class SVMPredictingAgent:
         :return: The accuracy of the predictions.
         """
         logging.debug("Starting predictions of data.")
-        if self.kernel == "poly":
-            self.micro_svm = self.init_poly_svm(c_param)
-        elif self.kernel == "linear":
-            self.micro_svm = self.init_linear_svm(c_param)
+        if krnl is None:
+            if self.kernel == "poly":
+                self.micro_svm = self.init_poly_svm(c_param)
+            elif self.kernel == "linear":
+                self.micro_svm = self.init_linear_svm(c_param)
 
         predictions = self.micro_svm.predict(prediction_samples)
         accuracy = self.compute_accuracy(prediction_classes, predictions)
@@ -97,30 +176,33 @@ class SVMPredictingAgent:
         logging.debug("End of predictions.")
         return accuracy
 
-    def init_linear_svm(self, c_param):
+    def init_linear_svm(self, c_param, prob=False):
         """
             Initializes and trains an SVM to predict whether described microcalcifications in input data are benign or
             malicious.
+            :param prob: Whether to classify the data with probabilities, or assign classes directly.
             :param c_param: The error compensation parameter
             :return: The trained SVM to be used for predictions.
             """
         logging.debug("Initializing linear SVM from: " + self.training_file)
 
-        micro_svm = svm.SVC(kernel="linear", gamma="auto", C=c_param)
+        micro_svm = svm.SVC(kernel="linear", gamma="auto", C=c_param, probability=prob)
         micro_svm.fit(self.training_samples, self.training_classes)
 
         logging.debug("End of SVM initialization.")
         return micro_svm
 
-    def init_poly_svm(self, c_param, dgr=3):
+    def init_poly_svm(self, c_param, prob=False, dgr=2, gamma_scale=False):
         """
         Initializes and trains an SVM to predict whether described microcalcifications in input data are benign or
         malicious.
         :return: The trained SVM to be used for predictions.
         """
         logging.debug("Initializing SVM from: " + self.training_file)
-
-        micro_svm = svm.SVC(kernel="poly", degree=dgr, gamma="auto", C=c_param)
+        if gamma_scale:
+            micro_svm = svm.SVC(kernel="poly", degree=dgr, gamma="scale", C=c_param, probability=prob)
+        else:
+            micro_svm = svm.SVC(kernel="poly", degree=dgr, gamma="auto", C=c_param, probability=prob)
         micro_svm.fit(self.training_samples, self.training_classes)
 
         logging.debug("End of SVM initialization.")
@@ -160,7 +242,7 @@ class SVMPredictingAgent:
             x_min, x_max = x.min() - 1, x.max() + 1
             y_min, y_max = y.min() - 1, y.max() + 1
             xx, yy = numpy.meshgrid(numpy.arange(x_min, x_max, h),
-                                 numpy.arange(y_min, y_max, h))
+                                    numpy.arange(y_min, y_max, h))
             return xx, yy
 
         def plot_contours(ax, clf, xx, yy, **params):
@@ -233,7 +315,7 @@ class SVMPredictingAgent:
 
         logging.debug("Starting stratified K-fold test with data from: " + self.training_file)
 
-        skf = StratifiedKFold(n_splits=k, shuffle=True)
+        skf = StratifiedKFold(n_splits=k, shuffle=False)
         X_train = []
         y_train = []
         X_test = []
@@ -254,28 +336,107 @@ class SVMPredictingAgent:
 
         for i in range(k):
             if self.kernel == "poly":
-                self.micro_svm = svm.SVC(kernel="poly", degree=3, gamma="auto", C=c_param)
+                self.micro_svm = svm.SVC(kernel="poly", degree=2, gamma="scale", C=c_param)
                 self.micro_svm.fit(X_train[i], y_train[i])
             elif self.kernel == "linear":
                 self.micro_svm = svm.SVC(kernel="linear", gamma="auto", C=c_param)
                 self.micro_svm.fit(X_train[i], y_train[i])
             list_c.append(i)
-            accuracy = self.__predict(c_param, X_test[i], y_test[i])
+            accuracy = self.__predict(c_param, X_test[i], y_test[i], self.micro_svm)
             print(c_param, " error with accuracy: ", accuracy)
             list_accuracy.append(accuracy)
 
-        k_fold_mean = [numpy.mean(list_accuracy)]*len(list_c)
+        k_fold_mean = [numpy.mean(list_accuracy)] * len(list_c)
         print(k_fold_mean[0])
+
         fig, ax = pyplot.subplots()
         ax.plot(list_c, list_accuracy, label="Data", marker='o')
         ax.plot(list_c, k_fold_mean, label="Mean", linestyle='--')
         ax.legend(loc='upper right')
         ax.set(xlabel='Fold', ylabel='Accuracy',
-               title=('Accuracy for K-fold test with 3-poly kernel and PN, C=' + str(c_param)))
+               title=('Accuracy for ' + (str(k) + '-fold test with 2-poly kernel, scaling gamma, C=' + str(c_param))))
         ax.grid()
-        ax.text(0, 0.7, ("Mean = "+str(k_fold_mean[0])))
-        fig.savefig((str(k) + '-fold test with 3-poly kernel and PN, C=' + str(c_param)))
-        #pyplot.show()
+        ax.text(0, 0.8, ("Mean = " + str(k_fold_mean[0])))
+        fig.savefig((str(k) + '-fold test with 2-poly kernel, scaling gamma, C=' + str(c_param)))
+
+    def k_fold_ROC_test(self, c_param, k):
+        """
+        Uses the training data set to create a ROC curve using cross-validation. The procedure has a single parameter
+        called k that refers to the number of groups that a given data sample is to be split into.
+        It is stratified because it ensures that that each fold has the same proportion of observations with regard to
+        the class outcome value.
+        :param c_param: The error compensation parameter.
+        :param k: The number of folds for the stratified test.
+        :return: Saves a graph of the ROC curves and AUC of each fold, as well an average.
+        """
+
+        logging.debug("Creating ROC curve using K-fold test with data from: " + self.training_file)
+
+        skf = StratifiedKFold(n_splits=k, shuffle=True)
+        X_train = []
+        y_train = []
+        X_test = []
+        y_test = []
+        for a, b in (skf.split(self.training_samples, self.training_classes)):
+            X_train.append(self.training_samples[a])
+            y_train.append(self.training_classes[a])
+            X_test.append(self.training_samples[b])
+            y_test.append(self.training_classes[b])
+
+        X_train = numpy.array(X_train)
+        y_train = numpy.array(y_train)
+        X_test = numpy.array(X_test)
+        y_test = numpy.array(y_test)
+
+        list_c = []
+
+        tprs = []
+        aucs = []
+        mean_fpr = numpy.linspace(0, 1, 100)
+
+        for i in range(k):
+            if self.kernel == "poly":
+                self.micro_svm = svm.SVC(kernel="poly", degree=2, gamma="auto", C=c_param, probability=True)
+                self.micro_svm.fit(X_train[i], y_train[i])
+            elif self.kernel == "linear":
+                self.micro_svm = svm.SVC(kernel="linear", gamma="auto", C=c_param, probability=True)
+                self.micro_svm.fit(X_train[i], y_train[i])
+            list_c.append(i)
+            probas_ = self.micro_svm.predict_proba(X_test[i])
+            # Compute ROC curve and area the curve
+            fpr, tpr, thresholds = roc_curve(y_test[i], probas_[:, 1])
+            tprs.append(interp(mean_fpr, fpr, tpr))
+            tprs[-1][0] = 0.0
+            roc_auc = auc(fpr, tpr)
+            aucs.append(roc_auc)
+            pyplot.plot(fpr, tpr, lw=1, alpha=0.3,
+                        label='ROC fold %d (AUC = %0.2f)' % (i, roc_auc))
+
+        pyplot.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
+                    label='Chance', alpha=.8)
+
+        mean_tpr = numpy.mean(tprs, axis=0)
+        mean_tpr[-1] = 1.0
+        mean_auc = auc(mean_fpr, mean_tpr)
+        std_auc = numpy.std(aucs)
+        pyplot.plot(mean_fpr, mean_tpr, color='b',
+                    label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc),
+                    lw=2, alpha=.8)
+
+        std_tpr = numpy.std(tprs, axis=0)
+        tprs_upper = numpy.minimum(mean_tpr + std_tpr, 1)
+        tprs_lower = numpy.maximum(mean_tpr - std_tpr, 0)
+        pyplot.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2,
+                            label=r'$\pm$ 1 std. dev.')
+
+        pyplot.xlim([-0.05, 1.05])
+        pyplot.ylim([-0.05, 1.05])
+        pyplot.xlabel('False Positive Rate')
+        pyplot.ylabel('True Positive Rate')
+        pyplot.title('SVM receiver operating characteristic curve')
+        pyplot.legend(loc="lower right")
+        # pyplot.show()
+        pyplot.savefig((str(k) + '-fold ROC with 3-poly kernel and PN, C=' + str(c_param)))
 
     @staticmethod
     def preprocess_data(data_matrix):
