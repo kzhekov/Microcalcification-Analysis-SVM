@@ -5,5 +5,6 @@ from SVMPredictingAgent import SVMPredictingAgent
 if __name__ == "__main__":
     # Initializing the agent
     prediction_agent = SVMPredictingAgent("poly", "training_data.xlsx", "balanced_test.xlsx")
+    prediction_agent.k_fold_stratified_test(3640, 10)
     # Using prediction by patient on the given file ("balanced_test.xlsx")
-    prediction_agent.split_by_patient(3640, prob_param=True, gamma_scale=False)
+    #prediction_agent.split_by_patient(3640, prob_param=True, gamma_scale=False)

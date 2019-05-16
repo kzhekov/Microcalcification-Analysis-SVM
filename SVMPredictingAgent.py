@@ -11,7 +11,7 @@ from scipy import interp
 from sklearn import svm
 from sklearn.decomposition import PCA
 from sklearn.metrics import roc_curve, auc
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import MinMaxScaler
 
 
@@ -24,6 +24,7 @@ class SVMPredictingAgent:
 
     def __init__(self, kernel, training_file, test_file):
         logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+        logging.debug("Initializing agent")
         self.training_file = training_file
         self.test_file = test_file
         self.kernel = kernel
@@ -50,16 +51,21 @@ class SVMPredictingAgent:
         :param prob_param: Whether or not to calculate probabilities instead of directly classifying the micros
         :param c_param: The error compensation parameter.
         """
+        logging.debug("Starting per-patient prediction.")
+
+        # --- Generating SVM based on specified kernel ---
         if self.kernel == "poly":
             self.micro_svm = self.init_poly_svm(c_param, prob=True, gamma_scale=gamma_scale)
         elif self.kernel == "linear":
             self.micro_svm = self.init_linear_svm(c_param, prob=True)
+
         patient_array = [[] for i in range(
-            int(self.patients_list_prediction[-1][0]) - int(self.patients_list_prediction[0][0]) + 1)]
+            int(self.patients_list_prediction[:, 0].max()) - int(self.patients_list_prediction[:, 0].min()) + 1)]
         patient_class = [[] for i in range(
-            int(self.patients_list_prediction[-1][0]) - int(self.patients_list_prediction[0][0]) + 1)]
+            int(self.patients_list_prediction[:, 0].max()) - int(self.patients_list_prediction[:, 0].min()) + 1)]
+
         for i in range(len(self.patients_list_prediction)):
-            to_add = int(self.patients_list_prediction[i][0]) - int(self.patients_list_prediction[0][0])
+            to_add = int(self.patients_list_prediction[i][0]) - int(self.patients_list_prediction[:, 0].min())
             patient_array[to_add].append(self.patients_list_prediction[i][1:])
             patient_class[to_add].append(self.prediction_classes[i])
         patient_array = numpy.array(patient_array)
@@ -67,49 +73,54 @@ class SVMPredictingAgent:
         counter = 0
         predictions_accuracy = []
 
+        # --- Per-patient accuracy test ---
         if prob_param is False:
+            logging.debug("Starting per-patient accuracy test.")
             for patient_data in patient_array:
                 patient_data = numpy.array(patient_data)
                 counter += 1
-                print("Current patient data:", counter, "has the following shape:", patient_data.shape)
-                print("Current patient classes:", counter, "has the following values:", patient_class[counter - 1])
+                logging.debug("Current patient data:", counter, "has the following shape:", patient_data.shape)
+                logging.debug("Current patient classes:", counter, "has the following values:",
+                              patient_class[counter - 1])
                 current_prediction = self.__predict(c_param, patient_data,
                                                     [patient_class[counter - 1][0] for i in range(len(patient_data))],
                                                     self.micro_svm)
                 predictions_accuracy.append(current_prediction)
-                print("Current patient:", counter, "predicted with accuracy:", current_prediction)
+                logging.debug("Current patient:", counter, "predicted with accuracy:", current_prediction)
 
+            # --- Plotting the final graphs and results ---
             predictions_accuracy_mean = [numpy.mean(predictions_accuracy)] * len(predictions_accuracy)
-            print(predictions_accuracy_mean[0])
             fig, ax = pyplot.subplots()
             ax.plot(range(counter), predictions_accuracy, label="Patient Predictions Accuracy", marker='o')
             ax.plot(range(counter), predictions_accuracy_mean, label="Mean Prediction Accuracy", linestyle='--')
             ax.legend(loc='upper right')
             ax.set(xlabel='Fold', ylabel='Accuracy',
-                   title=('Accuracy test per patient with 3-' + self.kernel + ' kernel, C=' + str(c_param)))
+                   title=('Accuracy test per patient with 2-' + self.kernel + ' kernel, C=' + str(c_param)))
             ax.grid()
             ax.text(0, 0.7, ("Mean = " + str(predictions_accuracy_mean[0])))
-            print("Saving file :", ('Accuracy test per patient with ' + self.kernel + ' kernel, C=' + str(c_param)))
-            fig.savefig(('Accuracy test per patient with 3-' + self.kernel + ' kernel, C=' + str(c_param)))
+            logging.debug("Saving file :",
+                          ('Accuracy test per patient with ' + self.kernel + ' kernel, C=' + str(c_param)))
+            fig.savefig(('Accuracy test per patient with 2-' + self.kernel + ' kernel, C=' + str(c_param)))
 
+        # --- Per-patient diagnosis ---
         else:
+            # --- Variables used for graphing ---
             r = range(1, patient_array.__len__() + 1)
-            print("r=", r)
             green_bars = []
             orange_bars = []
             text_report = []
+
             for patient_data in patient_array:
                 patient_data = numpy.array(patient_data)
                 counter += 1
-                # print("Current patient data:", counter, "has the following shape:", patient_data.shape)
-                # print("Current patient classes:", counter, "has the following values:", patient_class[counter-1])
                 current_prediction = numpy.array(self.micro_svm.predict_proba(patient_data))
                 predictions_accuracy.append(current_prediction)
                 green_bars.append(current_prediction.mean(axis=0)[0])
                 orange_bars.append(current_prediction.mean(axis=0)[1])
                 predict_tuple = (float('%.3f' % (current_prediction.mean(axis=0)[0])),
                                  float('%.3f' % (current_prediction.mean(axis=0)[1])))
-                # Create diagnosis
+
+                # --- Creating text for diagnosis ---
                 if predict_tuple[0] >= 0.82:
                     diag = "Patient healthy, no biopsy needed."
                 elif predict_tuple[0] >= 0.71:
@@ -123,6 +134,7 @@ class SVMPredictingAgent:
 
                 text_report.append((predict_tuple[0], predict_tuple[1], diag))
 
+            # --- Plotting the final graphs and diagnosis ---
             predictions_accuracy = numpy.array(predictions_accuracy)
             raw_data = {'greenBars': green_bars, 'orangeBars': orange_bars}
             df = pd.DataFrame(raw_data)
@@ -134,12 +146,12 @@ class SVMPredictingAgent:
             fig.suptitle("Patient predictions and diagnosis", fontsize=13)
             ax = pyplot.subplot(121, title="Patient results graph")
             barWidth = 0.85
-            # Create green Bars
+            # Create green bars
             grB = pyplot.bar(r, greenBars, color='#b5ffb9', edgecolor='white', width=barWidth, label="Benign level")
-            # Create orange Bars
+            # Create orange bars
             orB = pyplot.bar(r, orangeBars, bottom=greenBars, color='#f9bc86', edgecolor='white', width=barWidth,
                              label="Malignant level")
-            # Create blue Bars
+            # Create gray dots for microcalcifications
             for i in r:
                 mic = pyplot.plot([i for x in range(len(predictions_accuracy[i - 1]))],
                                   predictions_accuracy[i - 1][:][:, 0] * 100,
@@ -148,11 +160,12 @@ class SVMPredictingAgent:
             # Custom x axis
             pyplot.xlabel("Patient Predictions")
             pyplot.xticks(r)
+
+            # Table displaying results and diagnosis
             pyplot.table(cellText=text_report, loc="right", colWidths=[0.1, 0.1, 0.8],
                          rowLabels=r)
             ax.legend(handles=[mic, grB, orB], loc="lower left")
             fig.tight_layout()
-            # Show graphic
             pyplot.show()
 
     def __predict(self, c_param, prediction_samples, prediction_classes, krnl=None):
@@ -315,12 +328,13 @@ class SVMPredictingAgent:
 
         logging.debug("Starting stratified K-fold test with data from: " + self.training_file)
 
-        skf = StratifiedKFold(n_splits=k, shuffle=False)
+        # Group K-fold makes sure there are no samples from the same patient in both the training and the testing set
+        skf = GroupKFold(n_splits=k)
         X_train = []
         y_train = []
         X_test = []
         y_test = []
-        for a, b in (skf.split(self.training_samples, self.training_classes)):
+        for a, b in (skf.split(self.training_samples, self.training_classes, self.patients_list_training[:, 0])):
             X_train.append(self.training_samples[a])
             y_train.append(self.training_classes[a])
             X_test.append(self.training_samples[b])
@@ -358,6 +372,7 @@ class SVMPredictingAgent:
         ax.grid()
         ax.text(0, 0.8, ("Mean = " + str(k_fold_mean[0])))
         fig.savefig((str(k) + '-fold test with 2-poly kernel, scaling gamma, C=' + str(c_param)))
+        pyplot.show()
 
     def k_fold_ROC_test(self, c_param, k):
         """
@@ -372,12 +387,13 @@ class SVMPredictingAgent:
 
         logging.debug("Creating ROC curve using K-fold test with data from: " + self.training_file)
 
-        skf = StratifiedKFold(n_splits=k, shuffle=True)
+        # Group K-fold makes sure there are no samples from the same patient in both the training and the testing set
+        skf = GroupKFold(n_splits=k)
         X_train = []
         y_train = []
         X_test = []
         y_test = []
-        for a, b in (skf.split(self.training_samples, self.training_classes)):
+        for a, b in (skf.split(self.training_samples, self.training_classes, self.patients_list_training[:, 0])):
             X_train.append(self.training_samples[a])
             y_train.append(self.training_classes[a])
             X_test.append(self.training_samples[b])
@@ -403,7 +419,7 @@ class SVMPredictingAgent:
                 self.micro_svm.fit(X_train[i], y_train[i])
             list_c.append(i)
             probas_ = self.micro_svm.predict_proba(X_test[i])
-            # Compute ROC curve and area the curve
+            # Compute ROC curve and area under the curve
             fpr, tpr, thresholds = roc_curve(y_test[i], probas_[:, 1])
             tprs.append(interp(mean_fpr, fpr, tpr))
             tprs[-1][0] = 0.0
@@ -412,6 +428,7 @@ class SVMPredictingAgent:
             pyplot.plot(fpr, tpr, lw=1, alpha=0.3,
                         label='ROC fold %d (AUC = %0.2f)' % (i, roc_auc))
 
+        # --- Plotting the ROC curve and other graph elements ---
         pyplot.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
                     label='Chance', alpha=.8)
 
@@ -435,8 +452,9 @@ class SVMPredictingAgent:
         pyplot.ylabel('True Positive Rate')
         pyplot.title('SVM receiver operating characteristic curve')
         pyplot.legend(loc="lower right")
-        # pyplot.show()
+        # Saving the figure directly in local directory
         pyplot.savefig((str(k) + '-fold ROC with 3-poly kernel and PN, C=' + str(c_param)))
+        pyplot.show()
 
     @staticmethod
     def preprocess_data(data_matrix):
